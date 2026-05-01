@@ -1,1132 +1,1013 @@
 #!/usr/bin/env python3
 """
-CS4200 - Assignment 4
-RV32I Datapath Simulator (Template)
+CS4200 - Assignment 6 (TEMPLATE - Cache Focus)
+RV32I stage-based simulator (IF/ID/EX/MEM/WB) + Data Cache
 
-Students must complete all TODO sections.
+IMPORTANT: Only the cache portion is TODO-masked.
+All prior-course topics (decode/control/ALU/datapath) are provided.
 
-Program behavior:
-  - Read instructions from hex_inst.txt
-  - Simulate execution using datapath stages:
-      IF → ID → EX → MEM → WB
-  - Generate logs at end of execution:
-      trace.log
-      regs_final.log
-      dmem_final.log
+Input:
+- hex_inst.txt (one 32-bit instruction per line, 8 hex chars), PC starts at 0.
 
-Restrictions:
-  - No nested functions
-  - No dataclasses
-  - Keep code simple and readable
+Required outputs:
+- trace.log
+- regs_final.log
+- dmem_final.log
+- cache.log
+- cache_stats.log
+
+Assignment 6 focus:
+- Implement set-associative cache with LRU, write-back + write-allocate.
+- Route ALL lw/sw through cache (no direct dmem access in MEM stage for lw/sw).
+- Produce cache logs/stats proving correctness.
 """
 
 MASK32 = 0xFFFFFFFF
 
+# ------------------------------------------------------------
+# Cache configuration (fixed for grading)
+# ------------------------------------------------------------
+CACHE_SIZE_BYTES = 256
+BLOCK_BYTES = 16            # 4 words per block
+ASSOC = 2                   # 2-way set associative
+
+WORD_BYTES = 4
+WORDS_PER_BLOCK = BLOCK_BYTES // WORD_BYTES
+NUM_SETS = (CACHE_SIZE_BYTES // BLOCK_BYTES) // ASSOC
+
 
 # ------------------------------------------------------------
-# 32-bit helpers
+# 32-bit helpers (given)
 # ------------------------------------------------------------
-
 def u32(x):
-    """
-    Return x truncated to 32 bits (unsigned).
-    Hint: mask with 0xFFFFFFFF
-    """
     return x & MASK32
 
 
 def s32(x):
-    """
-    Convert a 32-bit unsigned value to signed two's complement.
-    If bit 31 is 1, subtract 2^32.
-    """
-    x &= 0xFFFFFFFF
-
-    return x if x < 0x80000000 else x - 0x100000000
+    x = x & MASK32
+    if x & 0x80000000:
+        return x - 0x100000000
+    return x
 
 
 def sign_extend(value, bits):
-    """
-    Sign-extend 'value' which is 'bits' wide.
-
-    Example:
-        sign_extend(0b1111, 4) -> -1
-    """
+    mask = (1 << bits) - 1
+    v = value & mask
     sign_bit = 1 << (bits - 1)
-
-    return (value & (sign_bit-1)) - (value & sign_bit)
+    if v & sign_bit:
+        v = v - (1 << bits)
+    return v
 
 
 def get_bits(x, hi, lo):
-    """
-    Extract bits from position hi down to lo (inclusive).
-
-    Example:
-        get_bits(0b101100, 3, 1) -> 0b110
-    """
-    if hi < lo:
-
-        raise ValueError("hi must be >= lo")
-
-    mask = (1 << (hi - lo + 1) ) - 1
-
-    return (x>>lo) & mask
+    width = hi - lo + 1
+    return (x >> lo) & ((1 << width) - 1)
 
 
 # ------------------------------------------------------------
-# Immediate Generators
+# Immediate generators (given)
 # ------------------------------------------------------------
-
 def imm_i(instr):
-    """
-    I-type immediate = bits [31:20]
-    Sign extend to 32 bits
-    """
-    result = get_bits(instr,31,20)
-
-    return sign_extend(result, 12)
+    return sign_extend(get_bits(instr, 31, 20), 12)
 
 
 def imm_s(instr):
-    """
-    S-type immediate uses:
-        bits [31:25] and [11:7]
-    Combine then sign extend.
-    """
-    imm_11_5 = get_bits(instr,31,25)
-
-    imm_4_0 = get_bits(instr,11,7)
-
-    imm = (imm_11_5 << 5) | imm_4_0
-
-    return sign_extend(imm,12)
+    hi = get_bits(instr, 31, 25)
+    lo = get_bits(instr, 11, 7)
+    return sign_extend((hi << 5) | lo, 12)
 
 
 def imm_b(instr):
-    """
-    B-type immediate uses scattered bits:
-        imm[12]   = instr[31]
-        imm[11]   = instr[7]
-        imm[10:5] = instr[30:25]
-        imm[4:1]  = instr[11:8]
-        imm[0]    = 0
-    Then sign extend to 32 bits.
-    """
-    imm_12 = get_bits(instr,31,31)
-
-    imm_10_5 = get_bits(instr, 30,25)
-
-    imm_4_1 = get_bits(instr,11,8)
-
-    imm_11 = get_bits(instr,7,7)
-
-    imm = (imm_12 << 12) | (imm_11 << 11) | (imm_10_5 << 5) | (imm_4_1 << 1)
-
-    return sign_extend(imm,13)
+    b12 = get_bits(instr, 31, 31)
+    b11 = get_bits(instr, 7, 7)
+    b10_5 = get_bits(instr, 30, 25)
+    b4_1 = get_bits(instr, 11, 8)
+    val = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1)
+    return sign_extend(val, 13)
 
 
 def imm_u(instr):
-    """
-    TODO
-    U-type immediate = bits [31:12] << 12
-    """
-    return get_bits(instr,31,12) << 12
+    return get_bits(instr, 31, 12) << 12
 
 
 def imm_j(instr):
-    """
-    TODO
-    J-type immediate for JAL instruction.
-        imm[20]    = instr[31]
-        imm[10:1]  = instr[30:21]
-        imm[11]    = instr[20]
-        imm[19:12] = instr[19:12]
-        imm[0]     = 0
-    Then sign extend.
-    """
-    imm_20 = get_bits(instr,31,31)
-
-    imm_10_1 = get_bits(instr,30,21)
-
-    imm_11 = get_bits(instr,20,20)
-
-    imm_19_12 = get_bits(instr,19,12)
-
-    imm = (imm_20<<20) | (imm_19_12<<12) | (imm_11<<11) | (imm_10_1<<1)
-
-    return sign_extend(imm, 21)
+    j20 = get_bits(instr, 31, 31)
+    j10_1 = get_bits(instr, 30, 21)
+    j11 = get_bits(instr, 20, 20)
+    j19_12 = get_bits(instr, 19, 12)
+    val = (j20 << 20) | (j19_12 << 12) | (j11 << 11) | (j10_1 << 1)
+    return sign_extend(val, 21)
 
 
 # ------------------------------------------------------------
-# Instruction Decode
+# Decode + Control (given subset)
 # ------------------------------------------------------------
-
 def decode(instr):
-    """
-    TODO
-    Extract instruction fields and return dictionary with:
-        opcode
-        rd
-        funct3
-        rs1
-        rs2
-        funct7
-
-    Also compute all immediates and store:
-        imm_I
-        imm_S
-        imm_B
-        imm_U
-        imm_J
-    """
     d = {}
-    d["instr"]  = instr
+    d["instr"] = u32(instr)
     d["opcode"] = get_bits(instr, 6, 0)
-    d["rd"]     = get_bits(instr, 11, 7)
+    d["rd"] = get_bits(instr, 11, 7)
     d["funct3"] = get_bits(instr, 14, 12)
-    d["rs1"]    = get_bits(instr,19,15)
-    d["rs2"]    = get_bits(instr,24,20)
-    d["funct7"] = get_bits(instr,31,25)
-    d["imm_I"]  = imm_i(instr)
-    d["imm_S"]  = imm_s(instr)
-    d["imm_B"]  = imm_b(instr)
-    d["imm_U"]  = imm_u(instr)
-    d["imm_J"]  = imm_j(instr)
+    d["rs1"] = get_bits(instr, 19, 15)
+    d["rs2"] = get_bits(instr, 24, 20)
+    d["funct7"] = get_bits(instr, 31, 25)
+
+    d["imm_I"] = imm_i(instr)
+    d["imm_S"] = imm_s(instr)
+    d["imm_B"] = imm_b(instr)
+    d["imm_U"] = imm_u(instr)
+    d["imm_J"] = imm_j(instr)
     return d
 
 
-# ------------------------------------------------------------
-# Control Unit
-# ------------------------------------------------------------
-
 def main_control(d):
-    """
-    TODO
-    Implement the main control unit.
-    Based on opcode, generate control signals:
-        RegWrite
-        MemRead
-        MemWrite
-        MemToReg
-        ALUSrc
-        Branch
-        Jump
-        JumpReg
-        ALUOp
-        ImmSel
-        BrType
-    """
+    op = d["opcode"]
+    f3 = d["funct3"]
+
     c = {
         "RegWrite": 0,
-        "MemRead":  0,
+        "MemRead": 0,
         "MemWrite": 0,
         "MemToReg": 0,
-        "ALUSrc":   0,
-        "Branch":   0,
-        "Jump":     0,
-        "JumpReg":  0,
-        "ALUOp":    "ADDR",
-        "ImmSel":   None,
-        "BrType":   None,
+        "ALUSrc": 0,
+        "Branch": 0,
+        "Jump": 0,
+        "JumpReg": 0,
+        "ALUOp": "ADDR",
+        "ImmSel": None,
+        "BrType": None,
     }
 
-
-    
-    if d['opcode'] == 0b0110011: # R-Type
-
+    if op == 0x33:  # R
         c["RegWrite"] = 1
+        c["ALUSrc"] = 0
+        c["ALUOp"] = "R"
 
-        c["ALUOp"] = 'RTYPE'
-
-    elif d['opcode'] == 0b0010011: # I-Type
-
+    elif op == 0x13:  # I-ALU
         c["RegWrite"] = 1
+        c["ALUSrc"] = 1
+        c["ALUOp"] = "I"
+        c["ImmSel"] = "I"
 
-        c["ALUSrc"]   = 1
-
-        c["ALUOp"]    = "ITYPE"
-
-        c["ImmSel"]   = "I"
-
-    elif d['opcode'] == 0b0000011: # lw
-        
+    elif op == 0x03:  # lw
         c["RegWrite"] = 1
-
-        c["MemRead"]  = 1
-
+        c["MemRead"] = 1
         c["MemToReg"] = 1
+        c["ALUSrc"] = 1
+        c["ALUOp"] = "ADDR"
+        c["ImmSel"] = "I"
 
-        c["ALUSrc"]   = 1
-
-        c["ALUOp"]    = "ADDR"
-
-        c["ImmSel"]   = "I"
-
-    elif d['opcode'] == 0b0100011: # sw
-
+    elif op == 0x23:  # sw
         c["MemWrite"] = 1
-        
-        c["ALUSrc"]   = 1
-        
-        c["ALUOp"]    = "ADDR"
-        
-        c["ImmSel"]   = "S"
+        c["ALUSrc"] = 1
+        c["ALUOp"] = "ADDR"
+        c["ImmSel"] = "S"
 
-    elif d['opcode'] == 0b1100011: # Branch
+    elif op == 0x63:  # branches
+        c["Branch"] = 1
+        c["ALUSrc"] = 0
+        c["ALUOp"] = "BR"
+        c["ImmSel"] = "B"
+        if f3 == 0b000:
+            c["BrType"] = "beq"
+        elif f3 == 0b001:
+            c["BrType"] = "bne"
+        elif f3 == 0b100:
+            c["BrType"] = "blt"
+        elif f3 == 0b101:
+            c["BrType"] = "bge"
+        elif f3 == 0b110:
+            c["BrType"] = "bltu"
+        elif f3 == 0b111:
+            c["BrType"] = "bgeu"
 
-        c["Branch"]   = 1
-        
-        c["ALUOp"]    = "BRANCH"
-        
-        c["ImmSel"]   = "B"
-        
-        c["BrType"]   = d['funct3']
-
-    elif d['opcode'] == 0b1101111: # jal
-
+    elif op == 0x6F:  # jal
+        c["Jump"] = 1
         c["RegWrite"] = 1
-        
-        c["Jump"]     = 1
-        
-        c["MemToReg"] = 2 
-        
-        c["ImmSel"]   = "J"
+        c["ALUSrc"] = 1
+        c["ALUOp"] = "ADDR"
+        c["ImmSel"] = "J"
 
-    elif d['opcode'] == 0b1100111: # jalr
-        
+    elif op == 0x67:  # jalr
+        c["Jump"] = 1
+        c["JumpReg"] = 1
         c["RegWrite"] = 1
-        
-        c["JumpReg"]  = 1
-        
-        c["ALUSrc"]   = 1
-        
-        c["MemToReg"] = 2
-        
-        c["ALUOp"]    = "ADDR"
-        
-        c["ImmSel"]   = "I"
-
-    elif d['opcode'] == 0b0110111: # lui
-        
-        c["RegWrite"] = 1
-        
-        c["ALUSrc"]   = 1
-        
-        c["ALUOp"]    = "LUI"
-        
-        c["ImmSel"]   = "U"
-
-    elif d['opcode'] == 0b0010111: # auipc
-
-        c["RegWrite"] = 1
-
-        c["ALUSrc"]   = 1
-
-        c["ALUOp"]    = "AUIPC"
-        
-        c["ImmSel"]   = "U"
-
-
+        c["ALUSrc"] = 1
+        c["ALUOp"] = "ADDR"
+        c["ImmSel"] = "I"
 
     return c
 
 
-# ------------------------------------------------------------
-# ALU Control
-# ------------------------------------------------------------
+def select_imm(d, c):
+    sel = c["ImmSel"]
+    if sel == "I":
+        return d["imm_I"]
+    if sel == "S":
+        return d["imm_S"]
+    if sel == "B":
+        return d["imm_B"]
+    if sel == "U":
+        return d["imm_U"]
+    if sel == "J":
+        return d["imm_J"]
+    return 0
+
 
 def alu_control(c, d):
-    """
-    TODO
-    Determine ALU operation string:
-        ADD, SUB, AND, OR, XOR,
-        SLL, SRL, SRA, SLT, SLTU
+    op = c["ALUOp"]
+    f3 = d["funct3"]
+    f7 = d["funct7"]
 
-    Use:
-        - ALUOp
-        - funct3
-        - funct7
-    """
-
-    if(c['ALUOp'] == 'ADDR'):
-
+    if op == "ADDR":
         return "ADD"
-    
-    elif(c['ALUOp'] == 'RTYPE'):
-
-        if(d['funct3'] == 0x0 and d['funct7'] == 0x00):
-
-            return "ADD"
-        
-        elif(d['funct3'] == 0x0 and d['funct7'] == 0x20):
-
-            return "SUB"
-        
-        elif(d['funct3'] == 0x4 and d['funct7'] == 0x00):
-
-            return "XOR"
-        
-        elif(d['funct3'] == 0x6 and d['funct7'] == 0x00):
-
-            return "OR"
-        
-        elif(d['funct3'] == 0x7 and d['funct7'] == 0x00):
-
-            return "AND"
-        
-        elif(d['funct3'] == 0x1 and d['funct7'] == 0x00):
-
-            return "SLL"
-        
-        elif(d['funct3'] == 0x5 and d['funct7'] == 0x00):
-
-            return "SRL"
-        
-        elif(d['funct3'] == 0x5 and d['funct7'] == 0x20):
-
-            return "SRA"
-        
-        elif(d['funct3'] == 0x2 and d['funct7'] == 0x00):
-
-            return "SLT"
-        
-        elif(d['funct3'] == 0x3 and d['funct7'] == 0x00):
-
-            return "SLTU"
-        
-    elif(c['ALUOp'] == "BRANCH"):
-
+    if op == "BR":
         return "SUB"
-    
-    elif(c['ALUOp'] == "ITYPE"):
 
-        if(d['funct3'] == 0x0):
-
-            return "ADD"
-        
-        elif(d['funct3'] == 0x4):
-
-            return "XOR"
-        
-        elif(d['funct3'] == 0x6):
-
-            return "OR"
-        
-        elif(d['funct3'] == 0x7):
-
+    if op == "R":
+        if f3 == 0b000:
+            return "SUB" if f7 == 0b0100000 else "ADD"
+        if f3 == 0b111:
             return "AND"
-        
-        elif(d['funct3'] == 0x1):
-
+        if f3 == 0b110:
+            return "OR"
+        if f3 == 0b100:
+            return "XOR"
+        if f3 == 0b001:
             return "SLL"
-        
-        elif(d['funct3'] == 0x2):
-
+        if f3 == 0b101:
+            return "SRA" if f7 == 0b0100000 else "SRL"
+        if f3 == 0b010:
             return "SLT"
-        
-        elif(d['funct3'] == 0x3):
-
+        if f3 == 0b011:
             return "SLTU"
-        
-        elif(d['funct3'] == 0x5):
+        return "ADD"
+
+    if op == "I":
+        if f3 == 0b000:
+            return "ADD"
+        if f3 == 0b111:
+            return "AND"
+        if f3 == 0b110:
+            return "OR"
+        if f3 == 0b100:
+            return "XOR"
+        if f3 == 0b010:
+            return "SLT"
+        if f3 == 0b011:
+            return "SLTU"
+        if f3 == 0b001:
+            return "SLL"
+        if f3 == 0b101:
+            return "SRA" if f7 == 0b0100000 else "SRL"
+        return "ADD"
+
+    return "ADD"
+
+
+def alu_exec(alu_op, a, b):
+    a = u32(a)
+    b = u32(b)
+    shamt = b & 0x1F
+
+    if alu_op == "ADD":
+        return u32(a + b)
+    if alu_op == "SUB":
+        return u32(a - b)
+    if alu_op == "AND":
+        return u32(a & b)
+    if alu_op == "OR":
+        return u32(a | b)
+    if alu_op == "XOR":
+        return u32(a ^ b)
+    if alu_op == "SLL":
+        return u32(a << shamt)
+    if alu_op == "SRL":
+        return u32(a >> shamt)
+    if alu_op == "SRA":
+        return u32(s32(a) >> shamt)
+    if alu_op == "SLT":
+        return 1 if s32(a) < s32(b) else 0
+    if alu_op == "SLTU":
+        return 1 if u32(a) < u32(b) else 0
+
+    return u32(a + b)
 
-            if(d['funct7'] == 0x20):
-
-                return "SRA"
-            
-            else:
-
-                return "SRL"
-    
-    elif c['ALUOp'] == "LUI":
-        
-        return "LUI"
-
-    elif c['ALUOp'] == "AUIPC":
-        
-        return "AUIPC"
-        
-    
-
-
-# ------------------------------------------------------------
-# ALU
-# ------------------------------------------------------------
-
-def alu_exec(op, a, b):
-    """
-    TODO
-    Execute ALU operation.
-    Must support:
-        ADD, SUB, AND, OR, XOR,
-        SLL, SRL, SRA, SLT, SLTU
-
-    Return 32-bit result.
-    """
-
-    match op:
-
-        case "ADD":
-
-            return u32(a+b)
-        
-        case "SUB":
-
-            return u32(a-b)
-        
-        case "AND":
-
-            return a & b
-        
-        case "OR":
-
-            return a | b
-        
-        case "XOR":
-
-            return a ^ b
-        
-        case "SLL":
-
-            return  u32(a << (b & 0b11111))
-        
-        case "SRL":
-
-            return a >> (b & 0b11111)
-        
-        case "SRA":
-
-            return u32(s32(a) >> (b & 0b11111))
-        
-        case "SLT":
-
-            signed_a = s32(a)
-
-            signed_b = s32(b)
-
-            if signed_a < signed_b:
-
-                return 1
-
-            else:
-
-                return  0 
-        
-        case "SLTU":
-
-            if u32(a) < u32(b):
-
-                return 1
-            
-            else:
-
-                return 0
-        
-        case "LUI":
-
-            return u32(b)
-        
-        case "AUIPC":
-
-            return u32(a + b)
-            
-        case _:
-
-            return 0
-
-
-# ------------------------------------------------------------
-# IF Stage
-# ------------------------------------------------------------
-
-def stage_if(pc, imem):
-    """
-    TODO
-    Instruction Fetch stage.
-    Compute:
-        pc
-        pc_plus4
-        instr
-
-    If PC not in instruction memory,
-    return instr=None to signal halt.
-    """
-    out = {}
-    out["pc"]       = 0
-    out["pc_plus4"] = 0
-    out["instr"]    = None
-
-    if pc in imem:
-
-        out["pc"] = pc
-
-        out['pc_plus4'] = pc + 4
-
-        out["instr"] = imem[pc]
-
-
-    return out
-
-
-# ------------------------------------------------------------
-# Immediate Selector
-# ------------------------------------------------------------
-
-def select_imm(d, c):
-    """
-    TODO
-    Return correct immediate depending on control signal ImmSel.
-    """
-
-    match c['ImmSel']:
-
-        case 'I':
-
-            return d['imm_I']
-        
-        case 'S':
-
-            return d['imm_S']
-        
-        case 'B':
-
-            return d['imm_B']
-        
-        case 'U':
-
-            return d['imm_U']
-        
-        case 'J':
-
-            return d['imm_J']
-        
-        case _:
-
-            return 0
-            
-
-
-# ------------------------------------------------------------
-# ID Stage
-# ------------------------------------------------------------
-
-def stage_id(instr, regs):
-    """
-    TODO
-    Decode instruction
-    Generate control signals
-    Read register file
-    Select immediate
-
-    Return dictionary with:
-        decoded instruction
-        control signals
-        rs1_val
-        rs2_val
-        rd
-        immediate
-    """
-    out = {}
-    out["d"]       = {}
-    out["c"]       = {}
-    out["imm"]     = 0
-    out["rs1_val"] = 0
-    out["rs2_val"] = 0
-    out["rd"]      = 0
-    out["rs1"]     = 0
-    out["rs2"]     = 0
-
-    out["d"] = decode(instr)
-
-    out["c"] = main_control(out['d'])
-
-    out['imm'] = select_imm(out['d'], out['c'])
-
-    out['rd'] = out['d']['rd']
-
-    out['rs1'] = out['d']['rs1']
-
-    out['rs2'] = out['d']['rs2']
-
-    out['rs1_val'] = regs[out['rs1']]
-
-    out['rs2_val'] = regs[out['rs2']]
-
-
-    return out
-
-
-# ------------------------------------------------------------
-# Branch Logic
-# ------------------------------------------------------------
 
 def branch_taken(br_type, rs1_val, rs2_val):
-    """
-    TODO
-    Implement branch comparisons:
-        beq, bne, blt, bge, bltu, bgeu
-    """
-
-    if(br_type == 0x0):
-
-        #BEQ
-
-        if (rs1_val == rs2_val):
-
-            return True
-        
-        else:
-
-            return False
-    
-    elif(br_type == 0x1):
-
-        #BNE
-
-        if (rs1_val != rs2_val):
-
-            return True
-        
-        else:
-
-            return False
-        
-    elif(br_type == 0x4):
-
-        #BLT
-
-        if (s32(rs1_val) < s32(rs2_val)):
-
-            return True
-        
-        else:
-            
-            return False
-    
-    elif(br_type == 0x5):
-
-        #BGE
-
-        if(s32(rs1_val) >= s32(rs2_val)):
-
-            return True
-        
-        else:
-
-            return False
-        
-    elif(br_type == 0x6):
-
-        #BLTU
-
-        if (u32(rs1_val) < u32(rs2_val)):
-
-            return True
-        
-        else:
-            
-            return False
-        
-    elif(br_type == 0x7):
-
-        #BGEU
-
-        if(u32(rs1_val) >= u32(rs2_val)):
-
-            return True
-        
-        else:
-
-            return False
-    
-    else:
-
-        return False
+    if br_type == "beq":
+        return u32(rs1_val) == u32(rs2_val)
+    if br_type == "bne":
+        return u32(rs1_val) != u32(rs2_val)
+    if br_type == "blt":
+        return s32(rs1_val) < s32(rs2_val)
+    if br_type == "bge":
+        return s32(rs1_val) >= s32(rs2_val)
+    if br_type == "bltu":
+        return u32(rs1_val) < u32(rs2_val)
+    if br_type == "bgeu":
+        return u32(rs1_val) >= u32(rs2_val)
+    return False
 
 
 # ------------------------------------------------------------
-# EX Stage
+# Stage functions (given)
 # ------------------------------------------------------------
+def stage_if(pc, imem):
+    out = {}
+    out["pc"] = u32(pc)
+    out["pc_plus4"] = u32(pc + 4)
+    out["instr"] = imem.get(u32(pc), None)
+    return out
+
+
+def stage_id(instr, regs):
+    d = decode(instr)
+    c = main_control(d)
+    imm = select_imm(d, c)
+
+    out = {}
+    out["d"] = d
+    out["c"] = c
+    out["imm"] = imm
+    out["rs1"] = d["rs1"]
+    out["rs2"] = d["rs2"]
+    out["rd"] = d["rd"]
+    out["rs1_val"] = u32(regs[d["rs1"]])
+    out["rs2_val"] = u32(regs[d["rs2"]])
+    return out
+
 
 def stage_ex(pc, pc_plus4, id_out):
-    """
-    TODO
-    Execute stage responsibilities:
-        - determine ALU operation
-        - select ALU input2
-        - compute ALU result
-        - evaluate branch condition
-        - compute branch target
-        - compute jump target
-        - determine next PC
-    """
+    d = id_out["d"]
+    c = id_out["c"]
+    imm = id_out["imm"]
+
+    rs1_val = id_out["rs1_val"]
+    rs2_val = id_out["rs2_val"]
+
+    alu_op = alu_control(c, d)
+    alu_in2 = imm if c["ALUSrc"] else rs2_val
+    alu_res = alu_exec(alu_op, rs1_val, alu_in2)
+
+    next_pc = u32(pc_plus4)
+    taken = False
+
+    if c["Branch"] and c["BrType"] is not None:
+        taken = branch_taken(c["BrType"], rs1_val, rs2_val)
+        if taken:
+            next_pc = u32(pc + imm)
+
+    if c["Jump"]:
+        taken = True
+        if c["JumpReg"]:
+            next_pc = u32((rs1_val + imm) & 0xFFFFFFFE)
+        else:
+            next_pc = u32(pc + imm)
+
     out = {}
-    out["alu_op"]      = "ADD"
-    out["alu_res"]     = 0
-    out["next_pc"]     = pc_plus4
-    out["taken"]       = False
-    out["br_target"]   = 0
-    out["jal_target"]  = 0
-    out["jalr_target"] = 0
-
-    out["alu_op"] = alu_control(id_out["c"], id_out['d'])
-
-    if id_out['c']['ALUOp'] == "AUIPC":
-
-        alu_a = pc
-
-    else:
-
-        alu_a = id_out['rs1_val']
-
-
-    if id_out['c']["ALUSrc"] == 1:
-
-        out["alu_res"] = alu_exec(out["alu_op"], alu_a, id_out['imm'])
-    
-    else:
-
-         out["alu_res"] = alu_exec(out["alu_op"], alu_a , id_out['rs2_val'])
-
-    if(id_out['c']['Branch'] == 1):
-
-        out['taken'] = branch_taken(id_out['c']['BrType'], id_out['rs1_val'], id_out['rs2_val'])
-
-        out['br_target'] = pc + id_out['imm']
-
-        if(out['taken']):
-
-            out['next_pc'] = out['br_target']
-    
-    if(id_out['c']['Jump'] == 1):
-
-        out['jal_target'] = u32(pc + id_out['imm'])
-
-        out['next_pc'] = out['jal_target']
-    
-    if(id_out['c']['JumpReg'] == 1):
-
-        out["jalr_target"] = u32(id_out['rs1_val'] + id_out['imm']) & ~1
-
-        out["next_pc"] = out["jalr_target"]
-
+    out["alu_op"] = alu_op
+    out["alu_res"] = u32(alu_res)
+    out["next_pc"] = u32(next_pc)
+    out["taken"] = taken
+    out["pc_plus4"] = u32(pc_plus4)
+    out["rs2_val"] = u32(rs2_val)   # used for sw
     return out
 
 
 # ------------------------------------------------------------
-# Data Memory
+# Backing memory helpers (given; DO NOT bypass cache for lw/sw)
 # ------------------------------------------------------------
-
-def dmem_load_word(dmem, addr):
+def mem_load_word(dmem, addr):
     """
-    TODO
-    Load word from data memory.
-    Enforce 4-byte alignment.
+    Given: backing memory read (word-aligned).
+    IMPORTANT: In Assignment 6, your lw must call cache_access_lw (not this directly).
+    This should only be used inside cache fill/writeback code.
     """
-    if (addr % 4 == 0):
+    if addr % 4 != 0:
+        raise ValueError("Unaligned lw at address 0x%08X" % addr)
+    return u32(dmem.get(addr, 0))
 
-        return dmem.get(addr,0)
+
+def mem_store_word(dmem, addr, value):
+    """
+    Given: backing memory write (word-aligned).
+    IMPORTANT: In Assignment 6, your sw must call cache_access_sw (not this directly).
+    This should only be used inside cache writeback code or cache flush.
+    """
+    if addr % 4 != 0:
+        raise ValueError("Unaligned sw at address 0x%08X" % addr)
+    dmem[addr] = u32(value)
+
+
+# =====================================================================
+# ==================== ASSIGNMENT 6: CACHE (TODO) =====================
+# =====================================================================
+
+def cache_make():
+    """
+    TODO (A6 CORE):
+    Create and return the cache data structure.
+
+    Recommended structure:
+      cache = list of NUM_SETS sets
+      each set = list of ASSOC lines (ways)
+      each line is a dict with:
+        valid : 0/1
+        dirty : 0/1
+        tag   : int
+        data  : list of WORDS_PER_BLOCK words (each 32-bit)
+        lru   : integer counter used for LRU replacement
+
+    Notes:
+    - Initialize all lines invalid and not dirty.
+    - data array should be filled with zeros initially.
+    """
+    
+    cache = []
+
+    for i in range(NUM_SETS):
+
+        cache_set = []
+
+        for j in range(ASSOC):
+
+            cache_set.append({'valid' : 0, 'dirty' : 0, 'tag' : 0, 'data' : [0] * WORDS_PER_BLOCK , 'lru' : 0 })
+        
+        cache.append(cache_set)
+
+    return cache
+
+
+def cache_addr_parts(addr):
+    """
+    TODO (A6 CORE):
+    Given a BYTE address, compute (tag, set_index, word_offset) for this cache.
+
+    You must follow this standard mapping:
+      offset_bytes = addr % BLOCK_BYTES
+      block_addr   = addr // BLOCK_BYTES
+      set_index    = block_addr % NUM_SETS
+      tag          = block_addr // NUM_SETS
+      word_offset  = offset_bytes // 4    (0..WORDS_PER_BLOCK-1)
+
+    Return: (tag, set_index, word_offset)
+    """
+
+    offset_bytes = addr % BLOCK_BYTES
+
+    block_addr = addr // BLOCK_BYTES
+
+    set_index = block_addr % NUM_SETS
+
+    tag = block_addr // NUM_SETS
+
+    word_offset = offset_bytes // 4
+
+
+    return tag, set_index, word_offset
+
+
+def cache_block_base_addr(tag, set_index):
+    """
+    TODO (A6 CORE):
+    Compute the byte base address of the block identified by (tag, set_index).
+
+    Reverse mapping:
+      block_addr = tag * NUM_SETS + set_index
+      base_addr  = block_addr * BLOCK_BYTES
+
+    Return base_addr (byte address).
+    """
+
+    block_addr = tag * NUM_SETS + set_index
+
+    base_addr = block_addr * BLOCK_BYTES
+
+    return base_addr
+
+
+def cache_touch_lru(cache, set_index, used_way):
+    """
+    TODO (A6 CORE):
+    Update LRU metadata so that (set_index, used_way) is MOST recently used.
+
+    Simple approach:
+      - let used_way.lru = max_lru_in_set + 1
+
+    Any consistent LRU implementation is okay, as long as:
+      - victim selection chooses least-recently-used line among valid lines
+      - accesses update recency
+    """
+
+    max_lru = 0
+
+    for way in cache[set_index]:
+
+        if way['lru'] > max_lru:
+
+            max_lru = way['lru']
+        
+    
+    cache[set_index][used_way]['lru'] = max_lru + 1
+    
+    return
+
+
+def cache_choose_victim(cache, set_index):
+    """
+    TODO (A6 CORE):
+    Choose a victim way in the given set:
+      - If any invalid line exists, return that way first.
+      - Else return way with smallest lru value (least recently used).
+
+    Return: victim_way (0..ASSOC-1)
+    """
+
+    victim_way_i = 0
+
+    #Goes through each way in set_index to see if any lines are not valid
+
+    for way_i in range(ASSOC):
+
+        if cache[set_index][way_i]['valid'] == 0:
+
+            return way_i
+        
+    
+    for way_i in range(ASSOC):
+
+        if cache[set_index][way_i]['lru'] < cache[set_index][victim_way_i]['lru']:
+
+            victim_way_i = way_i
+
+    return victim_way_i
+
+
+def cache_writeback_if_needed(dmem, cache, set_index, way, cache_lines_log, stats):
+    """
+    TODO (A6 CORE):
+    If the chosen line is valid AND dirty:
+      - Write back the entire block to backing memory (dmem) word-by-word.
+      - Record a log line into cache_lines_log such as:
+          "WB | set=... way=... tag=... base=..."
+      - Increment stats["writebacks"]
+      - Clear dirty bit.
+
+    Use:
+      base_addr = cache_block_base_addr(old_tag, set_index)
+      For each word i in block:
+        mem_store_word(dmem, base_addr + i*4, line.data[i])
+    """
+
+    if cache[set_index][way]['valid'] == 1 and cache[set_index][way]['dirty'] == 1:
+
+        base_addr = cache_block_base_addr(cache[set_index][way]['tag'] , set_index)
+
+        for i in range(WORDS_PER_BLOCK):
+
+            mem_store_word(dmem, base_addr + i*4, cache[set_index][way]['data'][i])
+        
+        cache_lines_log.append(f"WB | set = {set_index} way = {way} tag = 0x{cache[set_index][way]['tag']:X} base = 0x{base_addr:08X}")
+
+        stats['writebacks'] += 1
+
+        cache[set_index][way]['dirty'] = 0
+
+
+    return
+
+
+def cache_fill_block_from_mem(dmem, cache, set_index, way, tag):
+    """
+    TODO (A6 CORE):
+    Fill a cache line from backing memory (read entire block):
+      - base_addr = cache_block_base_addr(tag, set_index)
+      - for each i in 0..WORDS_PER_BLOCK-1:
+          line.data[i] = mem_load_word(dmem, base_addr + i*4)
+      - set valid=1, dirty=0, tag=tag
+    """
+    base_addr = cache_block_base_addr(tag, set_index)
+
+    for i in range(WORDS_PER_BLOCK):
+
+        cache[set_index][way]['data'][i] = mem_load_word(dmem,base_addr + i*4)
+
+    cache[set_index][way]['valid'] = 1 
+
+    cache[set_index][way]['dirty'] = 0
+
+    cache[set_index][way]['tag'] = tag
+
+    return 
+
+
+def cache_access_lw(dmem, cache, addr, cache_lines_log, stats):
+    """
+    TODO (A6 CORE): Cache read access for lw.
+
+    Requirements:
+    - Enforce word alignment (addr % 4 == 0). If not aligned, raise ValueError.
+    - Compute (tag, set_index, word_offset).
+    - HIT:
+        - stats["lw_hits"] += 1
+        - update LRU
+        - log: "LW HIT | addr=... set=... way=... tag=... woff=... val=..."
+        - return the word from cache line.data[word_offset]
+    - MISS (write-allocate):
+        - stats["lw_misses"] += 1
+        - choose victim (invalid first else LRU)
+        - if victim valid: log eviction line (include dirty)
+        - if victim dirty: write back (cache_writeback_if_needed)
+        - fill victim from memory (cache_fill_block_from_mem)
+        - update LRU
+        - log: "LW MISS | addr=... set=... way=... tag=... woff=... val=..."
+        - return loaded word
+    """
+
+    if(addr % 4 != 0):
+
+        raise ValueError        
+
+
+    else:
+
+
+        tag, set_index, word_offset = cache_addr_parts(addr)
+
+        hit = -1
+
+        # Searches ways in set_index for a hit
+
+        for way_i in range(ASSOC):
+           
+            if cache[set_index][way_i]['valid'] == 1 and cache[set_index][way_i]['tag'] == tag:
+               
+                hit = way_i
+        
+        # Cache hit
+
+        if hit != -1:
+
+            stats['lw_hits'] += 1
+
+            cache_touch_lru(cache,set_index,hit)
+
+            cache_lines_log.append(f"LW HIT | addr = 0x{addr:08X} set = {set_index} way= {hit} tag = 0x{tag:X} woff = {word_offset} val = {cache[set_index][hit]['data'][word_offset]}")
+
+            return cache[set_index][hit]['data'][word_offset]
+        
+        # Cache miss
+        
+        else:
+
+            stats['lw_misses'] += 1
+
+            victim_way = cache_choose_victim(cache,set_index)
+
+            if cache[set_index][victim_way]['valid'] == 1:
+
+                cache_lines_log.append(f"EVICT | set = {set_index} way = {victim_way} tag = 0x{cache[set_index][victim_way]['tag']:X} dirty = {cache[set_index][victim_way]['dirty']}")
+
+            
+            cache_writeback_if_needed(dmem,cache,set_index,victim_way,cache_lines_log,stats)
+
+            cache_fill_block_from_mem(dmem,cache,set_index,victim_way,tag)
+
+            cache_touch_lru(cache,set_index,victim_way)
+
+            cache_lines_log.append(f"LW MISS | addr = 0x{addr:08X} set = {set_index} way = {victim_way} tag = 0x{tag:X} woff = {word_offset} val = {cache[set_index][victim_way]['data'][word_offset]}")
+
+            return cache[set_index][victim_way]['data'][word_offset]
+
+
+def cache_access_sw(dmem, cache, addr, value, cache_lines_log, stats):
+    """
+    TODO (A6 CORE): Cache write access for sw.
+
+    Requirements:
+    - Enforce word alignment. If not aligned, raise ValueError.
+    - Write-back + write-allocate policy.
+
+    HIT:
+      - stats["sw_hits"] += 1
+      - update line.data[word_offset] = value
+      - mark dirty=1
+      - update LRU
+      - log: "SW HIT | addr=... set=... way=... tag=... woff=... val=..."
+
+    MISS (write-allocate):
+      - stats["sw_misses"] += 1
+      - choose victim (invalid first else LRU)
+      - if victim valid: log eviction (dirty?)
+      - if victim dirty: write back block
+      - fill block from memory
+      - perform store to cache line + set dirty=1
+      - update LRU
+      - log: "SW MISS | addr=... set=... way=... tag=... woff=... val=..."
+    """
+    
+    if(addr % 4 != 0):
+
+        raise ValueError
     
     else:
 
-        print("Load address misaligned")
+        tag, set_index, word_offset = cache_addr_parts(addr)
+
+        hit = -1
+
+        # Searches ways in set_index for a hit
+
+        for way_i in range(ASSOC):
+           
+            if cache[set_index][way_i]['valid'] == 1 and cache[set_index][way_i]['tag'] == tag:
+               
+                hit = way_i
+
+        if hit != -1:
+
+            stats['sw_hits'] += 1
+
+            cache[set_index][hit]['data'][word_offset] = value
+
+            cache[set_index][hit]['dirty'] = 1
+
+            cache_touch_lru(cache,set_index,hit)
+
+            cache_lines_log.append(f"SW HIT | addr = 0x{addr:08X} set = {set_index} way = {hit} tag = 0x{tag:X} woff = {word_offset} val = {value}")
+
+        else:
+
+            stats['sw_misses'] += 1
+
+            victim_way = cache_choose_victim(cache,set_index)
+
+            if cache[set_index][victim_way]['valid'] == 1:
+
+                cache_lines_log.append(f"EVICT | set = {set_index} way = {victim_way} tag = 0x{cache[set_index][victim_way]['tag']:X} dirty = {cache[set_index][victim_way]['dirty']}")
+
+            
+            cache_writeback_if_needed(dmem,cache,set_index,victim_way,cache_lines_log,stats)
+
+            cache_fill_block_from_mem(dmem,cache,set_index,victim_way,tag)
+
+            cache[set_index][victim_way]['data'][word_offset] = value
+            
+            cache[set_index][victim_way]['dirty'] = 1
+            
+            cache_touch_lru(cache, set_index, victim_way)
+
+            cache_lines_log.append(f"SW MISS | addr = 0x{addr:08X} set = {set_index} way =  {victim_way} tag = 0x{tag:X} woff = {word_offset} val = {value}")
 
 
-def dmem_store_word(dmem, addr, value):
+def cache_flush_all(dmem, cache, cache_lines_log, stats):
     """
-    TODO
-    Store word into data memory.
-    Enforce 4-byte alignment.
+    TODO (A6 CORE):
+    At program end, flush the cache:
+      - for every set and every way:
+          write back if dirty (cache_writeback_if_needed)
+      - log: "CACHE FLUSH DONE"
     """
 
-    if(addr % 4 == 0):
+    for set_i in range(NUM_SETS):
 
-        dmem[addr] = u32(value)
+        for way_i in range(ASSOC):
 
-    else:
+            if cache[set_i][way_i]['dirty'] == 1:
 
-        print("Store address misaligned")
+                cache_writeback_if_needed(dmem,cache,set_i,way_i,cache_lines_log,stats)
+    
+    cache_lines_log.append("CACHE FLUSH DONE")
 
-    pass
+    return
 
 
-# ------------------------------------------------------------
-# MEM Stage
-# ------------------------------------------------------------
-
-def stage_mem(id_out, ex_out, dmem):
+def stage_mem_with_cache(id_out, ex_out, cache, dmem, cache_lines_log, stats):
     """
-    TODO
-    Handle memory access.
-        If lw:  read from memory
-        If sw:  write to memory
+    TODO (A6 CORE):
+    This replaces the normal MEM stage for Assignment 6.
+
+    Requirements:
+    - Determine if instruction is lw or sw using control signals:
+        if c["MemRead"] -> lw
+        if c["MemWrite"] -> sw
+      (funct3==010 for word)
+    - For lw:
+        mem_data = cache_access_lw(dmem, cache, addr, cache_lines_log, stats)
+        stats["lw_total"] += 1
+    - For sw:
+        cache_access_sw(dmem, cache, addr, store_val, cache_lines_log, stats)
+        stats["sw_total"] += 1
+    - Must return dict:
+        out["mem_data"]
+        out["addr"]
+        out["cache_event"] = "LW" or "SW" or "" (used by trace.log)
+
+    IMPORTANT:
+    - Do NOT call mem_load_word/mem_store_word here for lw/sw.
+      Only cache functions may touch backing memory.
     """
     out = {}
     out["mem_data"] = 0
-    out["addr"]     = 0
+    out["addr"] = 0
+    out["cache_event"] = ""
 
-    if(id_out['c']['MemRead'] == 1):
+    out['addr'] = ex_out['alu_res']
 
-        out['addr'] = ex_out['alu_res']
+    if id_out['c']["MemRead"]:
 
-        out['mem_data'] = dmem_load_word(dmem,out['addr'])
+        out["mem_data"] = cache_access_lw(dmem,cache,ex_out['alu_res'], cache_lines_log, stats)
 
-    elif(id_out['c']['MemWrite'] == 1):
+        stats['lw_total'] += 1
 
-        out["addr"] = ex_out['alu_res']
+        out['cache_event'] = "LW"
+    
+    if id_out['c']['MemWrite']:
 
-        dmem_store_word(dmem,out['addr'],id_out['rs2_val'])
+        cache_access_sw(dmem,cache,ex_out['alu_res'], ex_out['rs2_val'],cache_lines_log,stats)
 
-        
+        stats['sw_total'] += 1
+
+        out['cache_event'] = "SW"
+
     return out
 
 
-# ------------------------------------------------------------
-# WB Stage
-# ------------------------------------------------------------
+def write_cache_stats(path, stats):
+    """
+    TODO (A6 CORE):
+    Write cache_stats.log with:
+      - config line (size, block, assoc, sets)
+      - total accesses (lw_total + sw_total), and breakdown
+      - hits and misses (lw_hits/lw_misses/sw_hits/sw_misses)
+      - hit rate = hits / total_accesses (handle divide by 0)
+      - writebacks count
 
+    Use simple plain text lines; one item per line is fine.
+    """
+
+    total_accesses = stats['lw_total'] + stats['sw_total']
+
+    total_hits = stats['lw_hits'] + stats["sw_hits"]
+
+    with open(path,'w') as f:
+
+        f.write(f"Cache Size {CACHE_SIZE_BYTES} bytes, Block Size {BLOCK_BYTES} bytes, Assoc {ASSOC}-way, Number of sets {NUM_SETS}\n")
+
+        f.write(f"Total accesses: {total_accesses}, lw total: {stats['lw_total']}, sw total: {stats['sw_total']}\n")
+
+        f.write(f"lw hits: {stats['lw_hits']}, lw misses: {stats['lw_misses']}, sw hits: {stats['sw_hits']}, sw misses: {stats['sw_misses']}\n")
+
+        f.write(f"hit rate: {total_hits / total_accesses if total_accesses > 0 else 0}\n")
+
+        f.write(f"Writeback count: {stats['writebacks']}")
+
+
+# =====================================================================
+# =================== END OF ASSIGNMENT 6 CACHE TODO ==================
+# =====================================================================
+
+
+# ------------------------------------------------------------
+# WB stage (given)
+# ------------------------------------------------------------
 def stage_wb(pc_plus4, id_out, ex_out, mem_out, regs):
-    """
-    TODO
-    Writeback stage:
-        Determine writeback value.
-        Write to register file if RegWrite.
-        Ensure x0 always stays 0.
-    """
+    c = id_out["c"]
+    rd = id_out["rd"]
+
+    wb_val = ex_out["alu_res"]
+    if c["MemToReg"]:
+        wb_val = mem_out["mem_data"]
+
+    if c["Jump"] and c["RegWrite"]:
+        wb_val = u32(pc_plus4)
+
+    did_write = False
+    if c["RegWrite"] and rd != 0:
+        regs[rd] = u32(wb_val)
+        did_write = True
+
+    regs[0] = 0
+
     out = {}
-    out["wb_val"]    = 0
-    out["wb_rd"]     = 0
-    out["did_write"] = False
-
-    if(id_out['c']['RegWrite'] == 1):
-
-        # Jumps
-
-        if(id_out['c']['Jump'] == 1 or id_out['c']['JumpReg']):
-
-            out['wb_val'] = pc_plus4
-        
-        #Load
-        
-        elif(id_out['c']['MemToReg'] == 1):
-
-            out['wb_val'] = mem_out['mem_data']
-        
-        # R + I Types + LUI + AUIPC
-        
-        else:
-
-            out["wb_val"] = ex_out["alu_res"]
-        
-        out['wb_rd'] = id_out['d']['rd']
-        
-        regs[out['wb_rd']] = u32(out['wb_val'])
-        
-        out['did_write'] = True
-    
+    out["wb_val"] = u32(wb_val)
+    out["wb_rd"] = rd
+    out["did_write"] = did_write
     return out
 
 
+# ------------------------------------------------------------
+# Trace helpers (given)
+# ------------------------------------------------------------
+def try_mnemonic(d):
+    op = d["opcode"]
+    f3 = d["funct3"]
+    f7 = d["funct7"]
 
-# Need inst mnemonic
-
-def get_mnemonic(id_out):
-
-    opcode = id_out['d']['opcode']
-
-    f3 = id_out['d']['funct3']
-
-    f7 = id_out['d']['funct7']
-
-    # R-Type
-
-    if(opcode == 0b0110011):
-
-        if f3 == 0b000 and f7 == 0b0000000:
-
-            return "add"
-        
-        elif f3 == 0b000 and f7 == 0b0100000:
-        
-            return "sub"
-        
-        elif f3 == 0b111 and f7 == 0b0000000:
-        
-            return "and"
-        
-        elif f3 == 0b110 and f7 == 0b0000000:
-        
-            return 'or'
-        
-        elif f3 == 0b100 and f7 == 0b0000000:
-        
-            return 'xor'
-        
-        elif f3 == 0b001 and f7 == 0b0000000:
-        
-            return 'sll'
-        
-        elif f3 == 0b101 and f7 == 0b0000000:
-        
-            return 'srl'
-        
-        elif f3 == 0b101 and f7 == 0b0100000:
-        
-            return 'sra'
-        
-        elif f3 == 0b010 and f7 == 0b0000000:
-        
-            return 'slt'
-        
-        elif f3 == 0b011 and f7 == 0b0000000:
-        
-            return 'sltu'
-        
-        else:
-        
-            return None
-    
-    elif(opcode == 0b0010011):
-
+    if op == 0x33:
         if f3 == 0b000:
+            return "sub" if f7 == 0b0100000 else "add"
+        if f3 == 0b111:
+            return "and"
+        if f3 == 0b110:
+            return "or"
+        if f3 == 0b100:
+            return "xor"
+        if f3 == 0b001:
+            return "sll"
+        if f3 == 0b101:
+            return "sra" if f7 == 0b0100000 else "srl"
+        if f3 == 0b010:
+            return "slt"
+        if f3 == 0b011:
+            return "sltu"
+        return "r?"
 
+    if op == 0x13:
+        if f3 == 0b000:
             return "addi"
-        
-        elif f3 == 0b111:
-
+        if f3 == 0b111:
             return "andi"
-        
-        elif f3 == 0b110:
-        
+        if f3 == 0b110:
             return "ori"
-        
-        elif f3 == 0b100:
-        
+        if f3 == 0b100:
             return "xori"
-        
-        elif f3 == 0b010:
-        
+        if f3 == 0b010:
             return "slti"
-        
-        elif f3 == 0b011:
-        
+        if f3 == 0b011:
             return "sltiu"
-        
-        if f3 == 0b001 and f7 == 0b0000000:
-        
+        if f3 == 0b001:
             return "slli"
-        
-        if f3 == 0b101 and f7 == 0b0000000:
-        
-            return "srli"
-        
-        if f3 == 0b101 and f7 == 0b0100000:
-        
-            return "srai"
-        
-        return None
-    
-    elif(opcode == 0b0000011):
+        if f3 == 0b101:
+            return "srai" if f7 == 0b0100000 else "srli"
+        return "i?"
 
-        if f3 == 0b010:
-            
-            return "lw"
-
-    elif(opcode == 0b0100011):
-
-        if f3 == 0b010:
-
-            return "sw"
-        
-    elif(opcode == 0b1100011):
-
-        mnem = {
-        0b000: "beq",
-        0b001: "bne",
-        0b100: "blt",
-        0b101: "bge",
-        0b110: "bltu",
-        0b111: "bgeu",
-        }.get(f3)
-
-        return mnem
-    
-    elif(opcode == 0b1101111):
-
+    if op == 0x03 and f3 == 0b010:
+        return "lw"
+    if op == 0x23 and f3 == 0b010:
+        return "sw"
+    if op == 0x63:
+        return {
+            0b000: "beq",
+            0b001: "bne",
+            0b100: "blt",
+            0b101: "bge",
+            0b110: "bltu",
+            0b111: "bgeu",
+        }.get(f3, "b?")
+    if op == 0x6F:
         return "jal"
-    
-    elif(opcode == 0b1100111 and f3 == 0x0):
-
+    if op == 0x67:
         return "jalr"
-    
-    elif(opcode == 0b0110111):
 
-        return "lui"
-    
-    elif(opcode == 0b0010111):
+    return "?"
 
-        return 'auipc'
-    
-    else:
-
-        return None
-# ------------------------------------------------------------
-# Trace Generation
-# ------------------------------------------------------------
 
 def trace_line(step, if_out, id_out, ex_out, mem_out, wb_out):
-    """
-    TODO
-    Produce readable trace string containing:
-        step
-        PC
-        instruction
-        ALU result
-        memory access
-        register writeback
-        next PC
-    """
+    d = id_out["d"]
+    c = id_out["c"]
+    mnem = try_mnemonic(d)
 
-    # Line 1: step, pc, instruction and mnemonic
+    parts = []
+    parts.append("step=%d" % step)
+    parts.append("pc=0x%08X" % if_out["pc"])
+    parts.append("instr=0x%08X" % d["instr"])
+    parts.append("mn=%s" % mnem)
 
-    line  = f"step={step} | pc=0x{if_out['pc']:08X} | instr=0x{if_out['instr']:08X} | mn={get_mnemonic(id_out)}\n"
+    parts.append("RegW=%d MemR=%d MemW=%d M2R=%d ALUSrc=%d Br=%d J=%d" % (
+        c["RegWrite"], c["MemRead"], c["MemWrite"], c["MemToReg"], c["ALUSrc"], c["Branch"], c["Jump"]
+    ))
 
-    # Line 2: control signals
+    parts.append("alu=%s res=0x%08X" % (ex_out["alu_op"], ex_out["alu_res"]))
 
-    line += f"RegW={id_out['c']['RegWrite']} MemR={id_out['c']['MemRead']} MemW={id_out['c']['MemWrite']} ALUSrc={id_out['c']['ALUSrc']} Br={id_out['c']['Branch']}\n"
+    if c["MemRead"] or c["MemWrite"]:
+        parts.append("mem@0x%08X rdata=0x%08X" % (mem_out["addr"], mem_out["mem_data"]))
+        if mem_out.get("cache_event", ""):
+            parts.append("cache=%s" % mem_out["cache_event"])
 
-    # Line 3: ALU operation and result
+    if wb_out["did_write"]:
+        parts.append("wb=x%d<-0x%08X" % (wb_out["wb_rd"], wb_out["wb_val"]))
 
-    line += f"alu={ex_out['alu_op']} res=0x{ex_out['alu_res']:08X}\n"
-
-    # Line 4: writeback
-
-    if wb_out['did_write']:
-    
-        line += f"wb=x{wb_out['wb_rd']}<-0x{wb_out['wb_val']:08X}\n"
-
-    else:
-
-        line += "wb=---\n"
-
-    # Line 5: next PC
-    line += f"next_pc=0x{ex_out['next_pc']:08X}\n"
-
-    return line
+    parts.append("next_pc=0x%08X" % ex_out["next_pc"])
+    return " | ".join(parts)
 
 
 # ------------------------------------------------------------
-# Program Loader
+# Loader + log writers (given)
 # ------------------------------------------------------------
-
 def load_imem_from_file(path):
     imem = {}
     pc = 0
-    f = open(path)
+    f = open(path, "r", encoding="utf-8")
     for line in f:
         s = line.strip()
         if not s:
             continue
+        if s.startswith("#"):
+            continue
+        if s.lower().startswith("0x"):
+            s = s[2:]
         instr = int(s, 16) & MASK32
         imem[pc] = instr
         pc += 4
@@ -1134,70 +1015,97 @@ def load_imem_from_file(path):
     return imem
 
 
-# ------------------------------------------------------------
-# Log Writers
-# ------------------------------------------------------------
-
-def write_trace_log(lines):
-    f = open("trace.log", "w")
-    for l in lines:
-        f.write(l + "\n")
+def write_lines(path, lines):
+    f = open(path, "w", encoding="utf-8")
+    i = 0
+    while i < len(lines):
+        f.write(lines[i] + "\n")
+        i += 1
     f.close()
 
 
-def write_regs_log(regs):
-    f = open("regs_final.log", "w")
+def write_regs_log(regs, path):
+    f = open(path, "w", encoding="utf-8")
     for i in range(32):
-        f.write("x%d = 0x%08X\n" % (i, regs[i]))
+        f.write("x%-2d = 0x%08X (%d)\n" % (i, u32(regs[i]), s32(regs[i])))
     f.close()
 
 
-def write_dmem_log(dmem):
-    f = open("dmem_final.log", "w")
+def write_dmem_log(dmem, path):
+    f = open(path, "w", encoding="utf-8")
     for a in sorted(dmem.keys()):
-        f.write("0x%08X : 0x%08X\n" % (a, dmem[a]))
+        f.write("0x%08X : 0x%08X (%d)\n" % (u32(a), u32(dmem[a]), s32(dmem[a])))
     f.close()
 
 
 # ------------------------------------------------------------
-# Main Simulation Loop
+# Main (given skeleton, cache TODOs plugged in)
 # ------------------------------------------------------------
-
 def main():
     imem = load_imem_from_file("hex_inst.txt")
+
     regs = [0] * 32
-    dmem = {}
-    pc = 0
-    steps = 0
+    dmem = {}  # backing memory (word-addressed dict)
+
+    # TODO (A6): create cache structure
+    cache = cache_make()
+
+    cache_lines_log = []
     trace_lines = []
 
-    while True:
+    # Stats dictionary (you must update these in cache + MEM stage)
+    stats = {
+        "lw_total": 0,
+        "sw_total": 0,
+        "lw_hits": 0,
+        "lw_misses": 0,
+        "sw_hits": 0,
+        "sw_misses": 0,
+        "writebacks": 0,
+    }
+
+    pc = 0
+    steps = 0
+    max_steps = 10_000_000
+
+    while steps < max_steps:
         if_out = stage_if(pc, imem)
         if if_out["instr"] is None:
             break
 
         pc_plus4 = if_out["pc_plus4"]
-        instr    = if_out["instr"]
+        instr = if_out["instr"]
 
-        id_out  = stage_id(instr, regs)
-        ex_out  = stage_ex(pc, pc_plus4, id_out)
-        mem_out = stage_mem(id_out, ex_out, dmem)
-        wb_out  = stage_wb(pc_plus4, id_out, ex_out, mem_out, regs)
+        id_out = stage_id(instr, regs)
+        ex_out = stage_ex(if_out["pc"], pc_plus4, id_out)
 
-        trace_lines.append(
-            trace_line(steps, if_out, id_out, ex_out, mem_out, wb_out)
-        )
+        # TODO (A6): MEM stage must use cache for lw/sw
+        mem_out = stage_mem_with_cache(id_out, ex_out, cache, dmem, cache_lines_log, stats)
 
-        pc = ex_out["next_pc"]
+        wb_out = stage_wb(pc_plus4, id_out, ex_out, mem_out, regs)
+
+        trace_lines.append(trace_line(steps, if_out, id_out, ex_out, mem_out, wb_out))
+
+        pc = u32(ex_out["next_pc"])
         regs[0] = 0
         steps += 1
 
-    write_trace_log(trace_lines)
-    write_regs_log(regs)
-    write_dmem_log(dmem)
+    # TODO (A6): flush dirty cache lines back to memory at end
+    cache_flush_all(dmem, cache, cache_lines_log, stats)
+
+    # write logs
+    write_lines("trace.log", trace_lines)
+    write_regs_log(regs, "regs_final.log")
+    write_dmem_log(dmem, "dmem_final.log")
+    write_lines("cache.log", cache_lines_log)
+
+    # TODO (A6): create cache_stats.log
+    write_cache_stats("cache_stats.log", stats)
 
     print("HALT")
     print("steps =", steps)
+    print("final pc = 0x%08X" % u32(pc))
+    print("wrote trace.log, regs_final.log, dmem_final.log, cache.log, cache_stats.log")
 
 
 if __name__ == "__main__":
