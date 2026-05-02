@@ -226,21 +226,21 @@ def alu_control(c, d):
 
     if op == "R":
         if f3 == 0b000:
-            return "SUB" if f7 == 0b0100000 else "ADD"
+            return "SUB" if f7 == 0b0100000 else ("MUL" if f7 == 0b0000001 else "ADD")
         if f3 == 0b111:
-            return "AND"
+            return "REMU" if f7 == 0b0000001 else "AND"
         if f3 == 0b110:
-            return "OR"
+            return "REM" if f7 == 0b0000001 else "OR"
         if f3 == 0b100:
-            return "XOR"
+            return "DIV" if f7 == 0b0000001 else "XOR"
         if f3 == 0b001:
-            return "SLL"
+            return "MULH" if f7 == 0b0000001 else "SLL"
         if f3 == 0b101:
-            return "SRA" if f7 == 0b0100000 else "SRL"
+            return "SRA" if f7 == 0b0100000 else ("DIVU" if f7 == 0b0000001 else "SRL")
         if f3 == 0b010:
-            return "SLT"
+            return "MULSU" if f7 == 0b0000001 else "SLT"
         if f3 == 0b011:
-            return "SLTU"
+            return "MULU" if 0b0000001 else "SLTU"
         return "ADD"
 
     if op == "I":
@@ -290,6 +290,25 @@ def alu_exec(alu_op, a, b):
         return 1 if s32(a) < s32(b) else 0
     if alu_op == "SLTU":
         return 1 if u32(a) < u32(b) else 0
+    if alu_op == "MUL":
+        return a * b
+    if alu_op == "MULH":
+        product = s32(a) * s32(b)
+        return u32(product >> 32)
+    if alu_op == "MULSU":
+        product = s32(a) * b
+        return u32(product >> 32)
+    if alu_op == "MULU":
+        product = a * b
+        return u32(product >> 32)
+    if alu_op == "DIV":
+        return (s32(a) / s32(b)) if b != 0 else 0xFFFFFFFF
+    if alu_op == "DIVU":
+        return (a / b) if b != 0 else 0xFFFFFFFF
+    if alu_op == "REM":
+        return s32(a) % s32(b)
+    if alu_op == "REMU":
+        return a % b
 
     return u32(a + b)
 
