@@ -1,0 +1,5 @@
+Cache Size 256 bytes, Block Size 16 bytes, Assoc 2-way, Number of sets 8
+Total accesses: 0, lw total: 0, sw total: 0
+lw hits: 0, lw misses: 0, sw hits: 0, sw misses: 0
+hit rate: 0
+Writeback count: 0

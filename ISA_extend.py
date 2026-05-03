@@ -40,7 +40,7 @@ NUM_SETS = (CACHE_SIZE_BYTES // BLOCK_BYTES) // ASSOC
 # 32-bit helpers (given)
 # ------------------------------------------------------------
 def u32(x):
-    return x & MASK32
+    return int(x) & MASK32
 
 
 def s32(x):
@@ -238,9 +238,9 @@ def alu_control(c, d):
         if f3 == 0b101:
             return "SRA" if f7 == 0b0100000 else ("DIVU" if f7 == 0b0000001 else "SRL")
         if f3 == 0b010:
-            return "MULSU" if f7 == 0b0000001 else "SLT"
+            return "MULHSU" if f7 == 0b0000001 else "SLT"
         if f3 == 0b011:
-            return "MULU" if 0b0000001 else "SLTU"
+            return "MULHU" if 0b0000001 else "SLTU"
         return "ADD"
 
     if op == "I":
@@ -295,10 +295,10 @@ def alu_exec(alu_op, a, b):
     if alu_op == "MULH":
         product = s32(a) * s32(b)
         return u32(product >> 32)
-    if alu_op == "MULSU":
+    if alu_op == "MULHSU":
         product = s32(a) * b
         return u32(product >> 32)
-    if alu_op == "MULU":
+    if alu_op == "MULHU":
         product = a * b
         return u32(product >> 32)
     if alu_op == "DIV":
@@ -926,21 +926,21 @@ def try_mnemonic(d):
 
     if op == 0x33:
         if f3 == 0b000:
-            return "sub" if f7 == 0b0100000 else "add"
+            return "sub" if f7 == 0b0100000 else ("mul" if f7 == 0b0000001 else "add")
         if f3 == 0b111:
-            return "and"
+            return "remu" if f7 == 0b0000001 else "and"
         if f3 == 0b110:
-            return "or"
+            return "rem" if f7 == 0b0000001 else "or"
         if f3 == 0b100:
-            return "xor"
+            return "div" if f7 == 0b0000001 else "xor"
         if f3 == 0b001:
-            return "sll"
+            return "mulh" if f7 == 0b0000001 else "sll"
         if f3 == 0b101:
-            return "sra" if f7 == 0b0100000 else "srl"
+            return "sra" if f7 == 0b0100000 else ("divu" if f7 == 0b0000001 else "srl")
         if f3 == 0b010:
-            return "slt"
+            return "mulhsu" if f7 == 0b0000001 else "slt"
         if f3 == 0b011:
-            return "sltu"
+            return "mulhu" if 0b0000001 else "sltu"
         return "r?"
 
     if op == 0x13:
