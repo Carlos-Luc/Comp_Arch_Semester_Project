@@ -322,7 +322,9 @@ def alu_exec(alu_op, a, b):
             result = -result
         return u32(result)
     if alu_op == "REMU":
-        return a % b if b != 0 else u32(a) # Return dividend
+        if b == 0:
+            return u32(a) # Return dividend
+        return a % b 
 
     return u32(a + b)
 
