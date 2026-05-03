@@ -240,7 +240,7 @@ def alu_control(c, d):
         if f3 == 0b010:
             return "MULHSU" if f7 == 0b0000001 else "SLT"
         if f3 == 0b011:
-            return "MULHU" if 0b0000001 else "SLTU"
+            return "MULHU" if f7 == 0b0000001 else "SLTU"
         return "ADD"
 
     if op == "I":
@@ -291,7 +291,7 @@ def alu_exec(alu_op, a, b):
     if alu_op == "SLTU":
         return 1 if u32(a) < u32(b) else 0
     if alu_op == "MUL":
-        return a * b
+        return u32(a * b) 
     if alu_op == "MULH":
         product = s32(a) * s32(b)
         return u32(product >> 32)
@@ -302,13 +302,27 @@ def alu_exec(alu_op, a, b):
         product = a * b
         return u32(product >> 32)
     if alu_op == "DIV":
-        return (s32(a) / s32(b)) if b != 0 else 0xFFFFFFFF
+        if b == 0:
+            return 0xFFFFFFFF # -1 here
+        if s32(a) == -0x80000000 and s32(b) == -1: # Checking for overflow conditions
+            return a # Returns dividend
+        result = abs(s32(a)) // abs(s32(b))
+        if (s32(a) < 0) ^ (s32(b) < 0): # Checking if signs differ
+            result = -result
+        return u32(result)
     if alu_op == "DIVU":
-        return (a / b) if b != 0 else 0xFFFFFFFF
+        return u32(a // b) if b != 0 else 0xFFFFFFFF # 2^32 - 1 here
     if alu_op == "REM":
-        return s32(a) % s32(b)
+        if b == 0:
+            return u32(a)
+        if s32(a) == -0x80000000 and s32(b) == -1: # Checking for overflow conditions
+            return 0
+        result = abs(s32(a)) % abs(s32(b))
+        if s32(a) < 0: # matching sign of remainder to sign of dividend
+            result = -result
+        return u32(result)
     if alu_op == "REMU":
-        return a % b
+        return a % b if b != 0 else u32(a) # Return dividend
 
     return u32(a + b)
 
@@ -940,7 +954,7 @@ def try_mnemonic(d):
         if f3 == 0b010:
             return "mulhsu" if f7 == 0b0000001 else "slt"
         if f3 == 0b011:
-            return "mulhu" if 0b0000001 else "sltu"
+            return "mulhu" if f7 == 0b0000001 else "sltu"
         return "r?"
 
     if op == 0x13:

@@ -6,5 +6,5 @@ step=4 | pc=0x00000010 | instr=0x0220A633 | mn=mulhsu | RegW=1 MemR=0 MemW=0 M2R
 step=5 | pc=0x00000014 | instr=0x0220B6B3 | mn=mulhu | RegW=1 MemR=0 MemW=0 M2R=0 ALUSrc=0 Br=0 J=0 | alu=MULHU res=0x00000001 | wb=x13<-0x00000001 | next_pc=0x00000018
 step=6 | pc=0x00000018 | instr=0x0220C733 | mn=div | RegW=1 MemR=0 MemW=0 M2R=0 ALUSrc=0 Br=0 J=0 | alu=DIV res=0xFFFFFFFD | wb=x14<-0xFFFFFFFD | next_pc=0x0000001C
 step=7 | pc=0x0000001C | instr=0x0220D7B3 | mn=divu | RegW=1 MemR=0 MemW=0 M2R=0 ALUSrc=0 Br=0 J=0 | alu=DIVU res=0x7FFFFFFC | wb=x15<-0x7FFFFFFC | next_pc=0x00000020
-step=8 | pc=0x00000020 | instr=0x0220E833 | mn=rem | RegW=1 MemR=0 MemW=0 M2R=0 ALUSrc=0 Br=0 J=0 | alu=REM res=0x00000001 | wb=x16<-0x00000001 | next_pc=0x00000024
+step=8 | pc=0x00000020 | instr=0x0220E833 | mn=rem | RegW=1 MemR=0 MemW=0 M2R=0 ALUSrc=0 Br=0 J=0 | alu=REM res=0xFFFFFFFF | wb=x16<-0xFFFFFFFF | next_pc=0x00000024
 step=9 | pc=0x00000024 | instr=0x0220F8B3 | mn=remu | RegW=1 MemR=0 MemW=0 M2R=0 ALUSrc=0 Br=0 J=0 | alu=REMU res=0x00000001 | wb=x17<-0x00000001 | next_pc=0x00000028
